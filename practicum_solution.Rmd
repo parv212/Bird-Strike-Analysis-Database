@@ -1,0 +1,334 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+## MySQL
+
+## Question 1
+
+### Connecting to MySQL server on Amazon AWS
+
+```{r}
+library(RMySQL)
+
+db_user <- 'admin'
+db_password <- 'khoury5200'
+db_name <- 'practicum'
+db_host <- 'parvpracticum.clwtsa2zfujt.us-east-2.rds.amazonaws.com'
+db_port <- 3306
+
+mydb <-  dbConnect(RMySQL::MySQL(), user = db_user, password = db_password,
+                 dbname = db_name, host = db_host, port = db_port)
+```
+
+Dropping table if they already exist.
+
+```{sql connection=mydb}
+DROP TABLE IF EXISTS incidents, airports, conditions;
+```
+
+Create table incidents with unique constraints on origin and condition so they are unique as they are referenced by foreign key.
+
+```{sql connection=mydb}
+CREATE TABLE incidents (
+  rid INT NOT NULL,
+  `date` DATE NOT NULL,
+  origin int NOT NULL,
+  airline TEXT DEFAULT NULL,
+  aircraft TEXT DEFAULT NULL,
+  flightPhase TEXT DEFAULT NULL,
+  altitude TEXT DEFAULT NULL,
+  conditions varchar(200) NOT NULL,
+  warning BOOLEAN DEFAULT NULL,
+  PRIMARY KEY (rid),
+  
+  CONSTRAINT uq_orig UNIQUE (origin),
+  CONSTRAINT uq_condition UNIQUE (conditions)
+);
+```
+
+Creating table airports and also added foreign key aid which references to origin in incidents table.
+
+```{sql connection=mydb}
+CREATE TABLE airports (
+  aid int NOT NULL,
+  airportName varchar(100) NOT NULL, 
+  airportCode varchar(5) DEFAULT NULL,
+  state text,
+  PRIMARY KEY (aid),
+  CONSTRAINT aid FOREIGN KEY (aid) REFERENCES incidents(origin)
+);
+```
+
+Created table conditions and added a foreign key which references to conditions in incidents table.
+
+```{sql connection=mydb}
+CREATE TABLE conditions (
+  cid int NOT NULL primary key,
+  conditions varchar(200) NOT NULL,
+  explanantion text DEFAULT NULL,
+  CONSTRAINT conditions FOREIGN KEY (conditions) REFERENCES incidents (conditions)
+);
+```
+
+Reading the Bird Strikes CSV file.
+
+```{r, warning=FALSE}
+library(dplyr)
+library(sqldf)
+
+data.read <- read.csv(file = "BirdStrikesData-V2.csv")
+
+data.read
+```
+
+Removing Military airlines as asked in the question using <> (not equal to) sign.
+
+```{r}
+detach("package:RMySQL", unload=TRUE)
+data.read <- sqldf::sqldf("select * from `data.read` where airline <> 'MILITARY'")
+
+data.read
+```
+
+Checking all the unique flight phases preset in the table.
+
+```{r}
+unique(data.read[c("flight_phase")])
+```
+
+Replacing the flight phases with the harmonizations given in the question. Also, replacing the warning value with True and False.
+
+```{r}
+data.read$flight_phase <- replace(data.read$flight_phase, 
+                                  data.read$flight_phase == "Climb",
+                                  "takeoff")
+
+data.read$flight_phase <- replace(data.read$flight_phase, 
+                                  data.read$flight_phase == "Take-off run",
+                                  "takeoff")
+
+data.read$flight_phase <- replace(data.read$flight_phase, 
+                                  data.read$flight_phase == "Landing Roll",
+                                  "landing")
+
+data.read$flight_phase <- replace(data.read$flight_phase, 
+                                  data.read$flight_phase == "Approach",
+                                  "landing")
+
+data.read$flight_phase <- replace(data.read$flight_phase, 
+                                  data.read$flight_phase == "Descent",
+                                  "landing")
+
+data.read$flight_phase <- replace(data.read$flight_phase, 
+                                  data.read$flight_phase == "",
+                                  "unknown")
+
+data.read$flight_phase <- replace(data.read$flight_phase, 
+                                  data.read$flight_phase == "Taxi",
+                                  "Parked")
+
+data.read$pilot_warned_flag <- replace(data.read$pilot_warned_flag,
+                                       data.read$pilot_warned_flag == "N",
+                                       FALSE)
+
+data.read$pilot_warned_flag <- replace(data.read$pilot_warned_flag,
+                                       data.read$pilot_warned_flag == "Y",
+                                       TRUE)
+
+data.read
+```
+
+## Question 2
+
+Extracting the colums needed for airports table with the help of sqldf package. Also added a synthetic primary key as aid.
+
+```{r load airports}
+library(sqldf)
+
+data.airports <- sqldf::sqldf("SELECT DISTINCT airport AS airportName, 1 AS aid,
+                               origin AS state FROM `data.read`")
+
+n.airports <- nrow(data.airports)
+data.airports[, 2] <- seq(1, n.airports)
+
+data.airports <- data.airports %>%
+  mutate(airportCode=NA,
+         .before=state)
+
+data.airports <- data.airports %>% select(aid, airportName, airportCode, state)
+
+data.airports
+```
+
+Extracted the incidents table from the data with the help of sqldf package and also changed the datatype of date. Also, origin table is converted to aid.
+
+```{r load incidents, warning=FALSE}
+data.incidents <- sqldf::sqldf("SELECT rid, flight_date AS `date`,
+                               airport AS origin, airline, aircraft, flight_phase AS flightPhase,
+                               altitude_ft AS altitude, sky_conditions AS conditions, 
+                               pilot_warned_flag AS warning FROM `data.read`")
+
+data.incidents$date <- as.Date(data.incidents$date, "%m/%d/%Y")
+
+ori <- sqldf::sqldf("SELECT a.aid, i.origin from `data.airports` as a 
+                                      left join `data.incidents` as i
+                                      on i.origin = a.airportName
+                    GROUP BY aid")
+
+for (i in 1:nrow(data.incidents)){
+  data.incidents$origin[i] <- ori$aid[data.incidents$origin[i] == ori$origin]
+}
+
+data.incidents$origin <- as.integer(data.incidents$origin)
+
+data.incidents
+```
+
+Extracted the conditions table from the csv file using sqldf package. Also, added the synthetic primary key.
+
+```{r load conditions}
+data.conditions <- sqldf::sqldf("SELECT DISTINCT sky_conditions as conditions, 1 as cid
+                                FROM `data.read`")
+
+n.conditions <- nrow(data.conditions)
+data.conditions[, 2] <- seq(1, n.conditions)
+
+data.conditions <- data.conditions %>%
+  mutate(explanation=NA)
+
+data.conditions <- data.conditions %>% select(cid, conditions, explanation)
+
+data.conditions
+```
+
+## Question 3
+
+### Writing the tables and displaying them
+
+```{r}
+library(RMySQL)
+dbWriteTable(mydb, "conditions", data.conditions, overwrite = T, row.names = F)
+```
+
+```{sql connection=mydb}
+SELECT * FROM conditions;
+```
+
+```{r}
+library(RMySQL)
+dbWriteTable(mydb, "airports", data.airports, overwrite = T, row.names = F)
+```
+
+```{sql connection=mydb}
+SELECT * FROM airports;
+```
+
+```{r}
+library(RMySQL)
+dbWriteTable(mydb, "incidents", data.incidents, overwrite = T, row.names = F)
+```
+
+```{sql connection=mydb}
+SELECT * FROM incidents;
+```
+
+## Question 4
+
+Grouping airlines and counting the rid to get the number of incidents for each airline.
+
+```{sql connection=mydb}
+select airline, count(rid) as incident_count 
+             from incidents
+             group by airline
+             order by incident_count desc
+             limit 10;
+```
+
+## Question 5
+
+Counting the rid to get the incident count for each flight phase and then dividing it by 4 tp get the average incidents for the flight phase. Displayng only the top result.
+
+```{sql connection=mydb}
+select flightPhase, count(rid)/4 as avg_impact
+             from incidents
+             group by flightPhase
+             order by avg_impact desc
+             limit 1
+```
+
+## Question 6
+
+Extracting the Month of all years and counting them with the help of rid. Month august has the most number of incidents.
+
+```{sql connection=mydb}
+select MONTH(`date`) as Month, count(rid) as Incident_count
+from incidents
+group by Month
+order by Incident_count desc
+```
+
+## Question 7
+
+Extracting the year count for the year 2005 to 2011 and then created a column plot for display.
+
+```{r}
+library(tidyverse)
+
+year_table <- dbGetQuery(mydb, 
+"Select YEAR(`date`) as Year, count(rid) as incident_count
+from incidents
+group by Year
+having Year >= 2005 and Year <= 2011
+order by Year;")
+
+ggplot(data = year_table) + 
+  geom_col(mapping = aes(x = factor(Year), y = incident_count)) +
+  labs(x = "Year", y = "Incident Count", 
+       title = "Incident Count from (2005 - 2011)") +
+  theme_minimal()
+```
+
+## Question 8
+
+Displaying the airports table.
+
+```{sql connection=mydb}
+Select * from airports;
+```
+
+Creating the stored procedure which will delete the aid given by the user.
+
+```{sql connection=mydb}
+CREATE PROCEDURE `removeBirdStrike`  
+(IN ID INT)
+BEGIN
+DELETE FROM airports WHERE aid = ID;
+END
+```
+
+Setting ID 1 to be deleted.
+
+```{sql connection=mydb}
+SET @ID = 1
+```
+
+Calling the stored procedure.
+
+```{sql connection=mydb}
+CALL `removeBirdStrike`
+(@ID)
+```
+
+Displaying the updated airports table.
+
+```{sql connection=mydb}
+Select * from airports;
+```
+
+Disconnecting Database
+
+```{r}
+dbDisconnect(mydb)
+```
